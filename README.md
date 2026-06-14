@@ -127,7 +127,9 @@ Execution timeout works by wrapping each job in `context.WithTimeout`. Jobs shou
 gowork/
 ├── client.go, job.go, worker.go   # Public API
 ├── migrate.go, schema.go          # Setup and validation
-├── cmd/worker/main.go             # Example worker binary
+├── cmd/
+│   ├── worker/main.go             # Example worker binary
+│   └── client/main.go             # Example client that enqueues ping jobs
 ├── examples/ping/ping.go          # Example job handler
 └── internal/
     ├── store/                     # sqlc-generated Postgres access
@@ -143,6 +145,7 @@ gowork/
 | `internal/worker` | Worker implementation |
 | `examples/ping` | Sample job handler |
 | `cmd/worker` | Runnable worker binary |
+| `cmd/client` | Example client that periodically enqueues ping jobs |
 
 Job handlers live in **your application**, not in this library. Each handler is a struct that implements `gowork.Job` and registers itself in `init()`. The worker binary blank-imports handler packages to trigger registration:
 
@@ -313,15 +316,24 @@ Test helpers live in [`internal/testutil/`](internal/testutil/) (`StartPostgres`
 ### Setup
 
 ```bash
+# Start local Postgres (matches default DATABASE_URL in worker/client)
+docker compose -f deployments/docker-compose.env.yml up -d
+
 # Regenerate store code after changing SQL
 just generate
 
-# Build and run the worker
+# Build both binaries
 just build
-./bin/worker
 
-# Or run directly
+# Terminal 1 — worker (claims and runs jobs)
 just run
+
+# Terminal 2 — client (enqueues ping jobs every 5s)
+just run-client
+
+# Optional client env vars
+CLIENT_ENQUEUE_INTERVAL=2s just run-client
+CLIENT_ENQUEUE_LIMIT=10 just run-client   # stop after 10 jobs (0 = unlimited)
 ```
 
 ### Changing SQL queries
