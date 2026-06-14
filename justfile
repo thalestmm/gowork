@@ -30,8 +30,12 @@ alias b := build
 build:
   @go build -o bin/worker ./cmd/worker
 
+alias t := test
+
 test:
   @go test ./...
+
+alias ti := test-integration
 
 test-integration:
   @go test -tags=integration ./...
