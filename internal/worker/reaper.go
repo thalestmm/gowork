@@ -6,12 +6,12 @@ import (
 	"log"
 	"time"
 
-	"github.com/thalestmm/gowork/repository"
+	"github.com/thalestmm/gowork/internal/store"
 )
 
 // RunStaleJobReaper periodically resets jobs stuck in running status. This
 // covers worker crashes and jobs that ignore execution context cancellation.
-func RunStaleJobReaper(ctx context.Context, db *repository.Queries, interval, staleAfter time.Duration) error {
+func RunStaleJobReaper(ctx context.Context, db *store.Queries, interval, staleAfter time.Duration) error {
 	if interval <= 0 {
 		interval = DefaultReaperInterval
 	}
@@ -28,7 +28,7 @@ func RunStaleJobReaper(ctx context.Context, db *repository.Queries, interval, st
 			return ctx.Err()
 		case <-ticker.C:
 			cutoff := time.Now().Add(-staleAfter)
-			n, err := db.ReapStaleJobs(ctx, repository.ReapStaleJobsParams{
+			n, err := db.ReapStaleJobs(ctx, store.ReapStaleJobsParams{
 				ErrorMessage: fmt.Sprintf("stale after %s", staleAfter),
 				Cutoff:       &cutoff,
 			})

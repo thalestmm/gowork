@@ -9,9 +9,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"github.com/thalestmm/gowork/internal/store"
 	"github.com/thalestmm/gowork/internal/testutil"
-	"github.com/thalestmm/gowork/jobs"
-	"github.com/thalestmm/gowork/repository"
 )
 
 func fastConfig(timeout time.Duration) Config {
@@ -24,7 +23,7 @@ func fastConfig(timeout time.Duration) Config {
 func startSimpleWorker(t *testing.T, db *testutil.DB, cfg Config) context.CancelFunc {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	w := NewSimple(db.Queries, cfg)
+	w := NewSimple(db.Store, cfg)
 	go func() {
 		_ = w.Run(ctx)
 	}()
@@ -48,7 +47,7 @@ func TestSimpleWorker_completesJob(t *testing.T) {
 	cancel := startSimpleWorker(t, db, fastConfig(time.Second))
 	defer cancel()
 
-	waitForJobStatus(t, db, job.ID, jobs.StatusCompleted)
+	waitForJobStatus(t, db, job.ID, "completed")
 
 	got := testutil.GetJob(t, db, job.ID)
 	require.NotNil(t, got.EndedAt)
@@ -66,18 +65,18 @@ func TestFailJob_retriesToPending(t *testing.T) {
 		MaxAttempts: &maxAttempts,
 	})
 
-	claimed, err := db.Queries.ClaimNextPendingJob(context.Background())
+	claimed, err := db.Store.ClaimNextPendingJob(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, int32(1), claimed.Attempts)
 
-	err = db.Queries.FailJob(context.Background(), repository.FailJobParams{
+	err = db.Store.FailJob(context.Background(), store.FailJobParams{
 		ErrorMessage: "boom",
 		ID:           job.ID,
 	})
 	require.NoError(t, err)
 
 	got := testutil.GetJob(t, db, job.ID)
-	require.Equal(t, jobs.StatusPending, got.Status)
+	require.Equal(t, "pending", got.Status)
 	require.Equal(t, int32(1), got.Attempts)
 	require.Contains(t, got.Errors[0], "boom")
 	require.Nil(t, got.EndedAt)
@@ -96,7 +95,7 @@ func TestSimpleWorker_failsPermanently(t *testing.T) {
 	cancel := startSimpleWorker(t, db, fastConfig(time.Second))
 	defer cancel()
 
-	waitForJobStatus(t, db, job.ID, jobs.StatusFailed)
+	waitForJobStatus(t, db, job.ID, "failed")
 
 	got := testutil.GetJob(t, db, job.ID)
 	require.NotNil(t, got.EndedAt)
@@ -113,7 +112,7 @@ func TestSimpleWorker_unlimitedRetries(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		got := testutil.GetJob(t, db, job.ID)
-		return got.Status == jobs.StatusPending && got.Attempts >= 2
+		return got.Status == "pending" && got.Attempts >= 2
 	}, 10*time.Second, 50*time.Millisecond)
 }
 
@@ -146,7 +145,7 @@ func TestSimpleWorker_jobTimeout(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		got := testutil.GetJob(t, db, job.ID)
-		return got.Status == jobs.StatusPending && len(got.Errors) > 0
+		return got.Status == "pending" && len(got.Errors) > 0
 	}, 5*time.Second, 50*time.Millisecond)
 
 	got := testutil.GetJob(t, db, job.ID)
@@ -161,7 +160,7 @@ func TestSimpleWorker_priorityOrdering(t *testing.T) {
 	_ = testutil.InsertJob(t, db, testutil.InsertOpts{Slug: testutil.SlugSuccess, Priority: 1})
 	high := testutil.InsertJob(t, db, testutil.InsertOpts{Slug: testutil.SlugSuccess, Priority: 10})
 
-	claimed, err := db.Queries.ClaimNextPendingJob(context.Background())
+	claimed, err := db.Store.ClaimNextPendingJob(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, high.ID, claimed.ID)
 }
@@ -176,7 +175,7 @@ func TestSimpleWorker_fifoWithinPriority(t *testing.T) {
 	testutil.SetJobCreatedAt(t, db, older.ID, time.Now().Add(-time.Hour))
 	testutil.SetJobCreatedAt(t, db, newer.ID, time.Now())
 
-	claimed, err := db.Queries.ClaimNextPendingJob(context.Background())
+	claimed, err := db.Store.ClaimNextPendingJob(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, older.ID, claimed.ID)
 }
@@ -190,7 +189,7 @@ func TestSimpleWorker_appendsLogs(t *testing.T) {
 	cancel := startSimpleWorker(t, db, fastConfig(time.Second))
 	defer cancel()
 
-	waitForJobStatus(t, db, job.ID, jobs.StatusCompleted)
+	waitForJobStatus(t, db, job.ID, "completed")
 
 	got := testutil.GetJob(t, db, job.ID)
 	require.GreaterOrEqual(t, len(got.Logs), 2)
@@ -208,13 +207,13 @@ func TestPriorityWorker_exclusiveBounds(t *testing.T) {
 	maxPriority := 15
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	w := NewPriority(db.Queries, fastConfig(time.Second), 5, &maxPriority)
+	w := NewPriority(db.Store, fastConfig(time.Second), 5, &maxPriority)
 	go func() { _ = w.Run(ctx) }()
 
-	waitForJobStatus(t, db, mid.ID, jobs.StatusCompleted)
+	waitForJobStatus(t, db, mid.ID, "completed")
 
-	require.Equal(t, jobs.StatusPending, testutil.GetJob(t, db, low.ID).Status)
-	require.Equal(t, jobs.StatusPending, testutil.GetJob(t, db, high.ID).Status)
+	require.Equal(t, "pending", testutil.GetJob(t, db, low.ID).Status)
+	require.Equal(t, "pending", testutil.GetJob(t, db, high.ID).Status)
 }
 
 func TestPriorityWorker_noUpperBound(t *testing.T) {
@@ -227,11 +226,11 @@ func TestPriorityWorker_noUpperBound(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	w := NewPriority(db.Queries, fastConfig(time.Second), 5, nil)
+	w := NewPriority(db.Store, fastConfig(time.Second), 5, nil)
 	go func() { _ = w.Run(ctx) }()
 
-	waitForJobStatus(t, db, high.ID, jobs.StatusCompleted)
-	require.Equal(t, jobs.StatusPending, testutil.GetJob(t, db, low.ID).Status)
+	waitForJobStatus(t, db, high.ID, "completed")
+	require.Equal(t, "pending", testutil.GetJob(t, db, low.ID).Status)
 }
 
 func TestSpecificTaskWorker_filtersSlug(t *testing.T) {
@@ -244,11 +243,11 @@ func TestSpecificTaskWorker_filtersSlug(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	w := NewSpecificTask(db.Queries, fastConfig(time.Second), testutil.SlugSuccess)
+	w := NewSpecificTask(db.Store, fastConfig(time.Second), testutil.SlugSuccess)
 	go func() { _ = w.Run(ctx) }()
 
-	waitForJobStatus(t, db, target.ID, jobs.StatusCompleted)
-	require.Equal(t, jobs.StatusPending, testutil.GetJob(t, db, other.ID).Status)
+	waitForJobStatus(t, db, target.ID, "completed")
+	require.Equal(t, "pending", testutil.GetJob(t, db, other.ID).Status)
 }
 
 func TestSimpleWorker_concurrentClaims(t *testing.T) {
@@ -262,7 +261,7 @@ func TestSimpleWorker_concurrentClaims(t *testing.T) {
 		ids[i] = job.ID
 	}
 
-	w := NewSimple(db.Queries, fastConfig(time.Second))
+	w := NewSimple(db.Store, fastConfig(time.Second))
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go func() {
@@ -271,7 +270,7 @@ func TestSimpleWorker_concurrentClaims(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		for _, id := range ids {
-			if testutil.GetJob(t, db, id).Status != jobs.StatusCompleted {
+			if testutil.GetJob(t, db, id).Status != "completed" {
 				return false
 			}
 		}

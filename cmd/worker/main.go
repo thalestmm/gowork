@@ -10,9 +10,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	_ "github.com/thalestmm/gowork/jobs" // register job handlers
-	"github.com/thalestmm/gowork/internal/worker"
-	"github.com/thalestmm/gowork/repository"
+	gowork "github.com/thalestmm/gowork"
+	_ "github.com/thalestmm/gowork/examples/ping"
 )
 
 func main() {
@@ -27,28 +26,36 @@ func main() {
 	}
 	defer pool.Close()
 
-	queries := repository.New(pool)
-	cfg := configFromEnv()
-	concurrency := envInt("WORKER_CONCURRENCY", 4)
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if err := gowork.Migrate(ctx, pool); err != nil {
+		log.Fatalf("migrate: %v", err)
+	}
+
+	client, err := gowork.Open(ctx, pool)
+	if err != nil {
+		log.Fatalf("open: %v", err)
+	}
+
+	cfg := configFromEnv()
+	concurrency := envInt("WORKER_CONCURRENCY", 4)
+
 	go func() {
-		if err := worker.RunStaleJobReaper(ctx, queries, cfg.ReaperInterval, cfg.StaleJobAfter); err != nil && err != context.Canceled {
+		if err := client.RunStaleJobReaper(ctx, cfg.ReaperInterval, cfg.StaleJobAfter); err != nil && err != context.Canceled {
 			log.Printf("stale job reaper stopped: %v", err)
 			stop()
 		}
 	}()
 
-	w := worker.NewSimple(queries, worker.Config{
+	worker := client.NewSimpleWorker(gowork.WorkerConfig{
 		Poll:       cfg.Poll,
 		JobTimeout: cfg.JobTimeout,
 	})
 
 	log.Printf("starting worker concurrency=%d job_timeout=%s stale_after=%s",
 		concurrency, cfg.JobTimeout, cfg.StaleJobAfter)
-	if err := worker.RunConcurrent(ctx, concurrency, w); err != nil {
+	if err := gowork.RunConcurrent(ctx, concurrency, worker); err != nil {
 		log.Fatalf("workers: %v", err)
 	}
 }
@@ -62,10 +69,10 @@ type runtimeConfig struct {
 
 func configFromEnv() runtimeConfig {
 	return runtimeConfig{
-		Poll:           envDuration("WORKER_POLL_INTERVAL", worker.DefaultPollInterval),
-		JobTimeout:     envDuration("JOB_TIMEOUT", worker.DefaultJobTimeout),
-		StaleJobAfter:  envDuration("STALE_JOB_TIMEOUT", worker.DefaultStaleJobAfter),
-		ReaperInterval: envDuration("REAPER_INTERVAL", worker.DefaultReaperInterval),
+		Poll:           envDuration("WORKER_POLL_INTERVAL", gowork.DefaultPollInterval),
+		JobTimeout:     envDuration("JOB_TIMEOUT", gowork.DefaultJobTimeout),
+		StaleJobAfter:  envDuration("STALE_JOB_TIMEOUT", gowork.DefaultStaleJobAfter),
+		ReaperInterval: envDuration("REAPER_INTERVAL", gowork.DefaultReaperInterval),
 	}
 }
 

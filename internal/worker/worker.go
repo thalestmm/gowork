@@ -7,19 +7,19 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/thalestmm/gowork/jobs"
-	"github.com/thalestmm/gowork/repository"
+	"github.com/thalestmm/gowork/internal/registry"
+	"github.com/thalestmm/gowork/internal/store"
 )
 
 type workerDeps struct {
-	db         *repository.Queries
+	db         *store.Queries
 	poll       time.Duration
 	jobTimeout time.Duration
 }
 
-type claimFunc func(ctx context.Context, q *repository.Queries) (repository.Job, error)
+type claimFunc func(ctx context.Context, q *store.Queries) (store.Job, error)
 
-func newWorkerDeps(db *repository.Queries, cfg Config) workerDeps {
+func newWorkerDeps(db *store.Queries, cfg Config) workerDeps {
 	cfg = cfg.withDefaults()
 	return workerDeps{
 		db:         db,
@@ -28,7 +28,7 @@ func newWorkerDeps(db *repository.Queries, cfg Config) workerDeps {
 	}
 }
 
-func (d workerDeps) claim(ctx context.Context, claim claimFunc) (*jobs.QueuedJob, bool, error) {
+func (d workerDeps) claim(ctx context.Context, claim claimFunc) (*registry.QueuedJob, bool, error) {
 	row, err := claim(ctx, d.db)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, false, nil
@@ -37,9 +37,9 @@ func (d workerDeps) claim(ctx context.Context, claim claimFunc) (*jobs.QueuedJob
 		return nil, false, err
 	}
 
-	queued, err := jobs.NewQueuedJob(row)
+	queued, err := registry.NewQueuedJob(row)
 	if err != nil {
-		failErr := d.db.FailJob(ctx, repository.FailJobParams{
+		failErr := d.db.FailJob(ctx, store.FailJobParams{
 			ErrorMessage: err.Error(),
 			ID:           row.ID,
 		})
@@ -51,8 +51,8 @@ func (d workerDeps) claim(ctx context.Context, claim claimFunc) (*jobs.QueuedJob
 	return &queued, true, nil
 }
 
-func (d workerDeps) process(ctx context.Context, queued *jobs.QueuedJob) error {
-	_ = d.db.AppendJobLog(ctx, repository.AppendJobLogParams{
+func (d workerDeps) process(ctx context.Context, queued *registry.QueuedJob) error {
+	_ = d.db.AppendJobLog(ctx, store.AppendJobLogParams{
 		LogMessage: fmt.Sprintf("started %q (attempt %d)", queued.Slug, queued.Attempts),
 		ID:         queued.ID,
 	})
@@ -61,13 +61,13 @@ func (d workerDeps) process(ctx context.Context, queued *jobs.QueuedJob) error {
 	defer cancel()
 
 	if err := runJob(execCtx, queued.Job); err != nil {
-		if failErr := d.db.FailJob(ctx, repository.FailJobParams{
+		if failErr := d.db.FailJob(ctx, store.FailJobParams{
 			ErrorMessage: err.Error(),
 			ID:           queued.ID,
 		}); failErr != nil {
 			return fmt.Errorf("execute job %s: %w (fail job: %v)", queued.ID, err, failErr)
 		}
-		_ = d.db.AppendJobLog(ctx, repository.AppendJobLogParams{
+		_ = d.db.AppendJobLog(ctx, store.AppendJobLogParams{
 			LogMessage: fmt.Sprintf("failed: %s", err),
 			ID:         queued.ID,
 		})
@@ -77,14 +77,14 @@ func (d workerDeps) process(ctx context.Context, queued *jobs.QueuedJob) error {
 	if err := d.db.CompleteJob(ctx, queued.ID); err != nil {
 		return fmt.Errorf("complete job %s: %w", queued.ID, err)
 	}
-	_ = d.db.AppendJobLog(ctx, repository.AppendJobLogParams{
+	_ = d.db.AppendJobLog(ctx, store.AppendJobLogParams{
 		LogMessage: "completed",
 		ID:         queued.ID,
 	})
 	return nil
 }
 
-func runJob(ctx context.Context, job jobs.Job) error {
+func runJob(ctx context.Context, job registry.Job) error {
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- job.Execute(ctx)
@@ -125,12 +125,12 @@ type SimpleWorker struct {
 	deps workerDeps
 }
 
-func NewSimple(db *repository.Queries, cfg Config) *SimpleWorker {
+func NewSimple(db *store.Queries, cfg Config) *SimpleWorker {
 	return &SimpleWorker{deps: newWorkerDeps(db, cfg)}
 }
 
 func (w *SimpleWorker) Run(ctx context.Context) error {
-	return w.deps.runLoop(ctx, func(ctx context.Context, q *repository.Queries) (repository.Job, error) {
+	return w.deps.runLoop(ctx, func(ctx context.Context, q *store.Queries) (store.Job, error) {
 		return q.ClaimNextPendingJob(ctx)
 	})
 }
@@ -141,7 +141,7 @@ type PriorityWorker struct {
 	MaxPriority *int
 }
 
-func NewPriority(db *repository.Queries, cfg Config, minPriority int, maxPriority *int) *PriorityWorker {
+func NewPriority(db *store.Queries, cfg Config, minPriority int, maxPriority *int) *PriorityWorker {
 	return &PriorityWorker{
 		deps:        newWorkerDeps(db, cfg),
 		MinPriority: minPriority,
@@ -157,8 +157,8 @@ func (w *PriorityWorker) Run(ctx context.Context) error {
 		maxPriority = &v
 	}
 
-	return w.deps.runLoop(ctx, func(ctx context.Context, q *repository.Queries) (repository.Job, error) {
-		return q.ClaimNextPendingJobByPriority(ctx, repository.ClaimNextPendingJobByPriorityParams{
+	return w.deps.runLoop(ctx, func(ctx context.Context, q *store.Queries) (store.Job, error) {
+		return q.ClaimNextPendingJobByPriority(ctx, store.ClaimNextPendingJobByPriorityParams{
 			MinPriority: minPriority,
 			MaxPriority: maxPriority,
 		})
@@ -170,7 +170,7 @@ type SpecificTaskWorker struct {
 	TaskSlug string
 }
 
-func NewSpecificTask(db *repository.Queries, cfg Config, taskSlug string) *SpecificTaskWorker {
+func NewSpecificTask(db *store.Queries, cfg Config, taskSlug string) *SpecificTaskWorker {
 	return &SpecificTaskWorker{
 		deps:     newWorkerDeps(db, cfg),
 		TaskSlug: taskSlug,
@@ -179,7 +179,7 @@ func NewSpecificTask(db *repository.Queries, cfg Config, taskSlug string) *Speci
 
 func (w *SpecificTaskWorker) Run(ctx context.Context) error {
 	slug := w.TaskSlug
-	return w.deps.runLoop(ctx, func(ctx context.Context, q *repository.Queries) (repository.Job, error) {
+	return w.deps.runLoop(ctx, func(ctx context.Context, q *store.Queries) (store.Job, error) {
 		return q.ClaimNextPendingJobBySlug(ctx, slug)
 	})
 }

@@ -12,12 +12,12 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
-	"github.com/thalestmm/gowork/repository"
+	"github.com/thalestmm/gowork/internal/store"
 )
 
 type DB struct {
-	Pool    *pgxpool.Pool
-	Queries *repository.Queries
+	Pool  *pgxpool.Pool
+	Store *store.Queries
 }
 
 type InsertOpts struct {
@@ -55,32 +55,12 @@ func StartPostgres(t *testing.T) *DB {
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
-	migrate(t, pool)
+	require.NoError(t, migrateTestDB(ctx, pool))
 
 	return &DB{
-		Pool:    pool,
-		Queries: repository.New(pool),
+		Pool:  pool,
+		Store: store.New(pool),
 	}
-}
-
-func migrate(t *testing.T, pool *pgxpool.Pool) {
-	t.Helper()
-	_, err := pool.Exec(context.Background(), `
-CREATE TABLE IF NOT EXISTS jobs (
-  id UUID PRIMARY KEY,
-  slug TEXT NOT NULL,
-  payload JSONB,
-  priority INT NOT NULL DEFAULT 0,
-  max_attempts INT,
-  status TEXT NOT NULL DEFAULT 'pending',
-  attempts INT NOT NULL DEFAULT 0,
-  logs TEXT[],
-  errors TEXT[],
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  started_at TIMESTAMPTZ,
-  ended_at TIMESTAMPTZ
-)`)
-	require.NoError(t, err)
 }
 
 func TruncateJobs(t *testing.T, db *DB) {
@@ -89,7 +69,7 @@ func TruncateJobs(t *testing.T, db *DB) {
 	require.NoError(t, err)
 }
 
-func InsertJob(t *testing.T, db *DB, opts InsertOpts) repository.Job {
+func InsertJob(t *testing.T, db *DB, opts InsertOpts) store.Job {
 	t.Helper()
 
 	if opts.ID == uuid.Nil {
@@ -105,7 +85,7 @@ func InsertJob(t *testing.T, db *DB, opts InsertOpts) repository.Job {
 		payload = &p
 	}
 
-	job, err := db.Queries.InsertJob(context.Background(), repository.InsertJobParams{
+	job, err := db.Store.InsertJob(context.Background(), store.InsertJobParams{
 		ID:          opts.ID,
 		Slug:        opts.Slug,
 		Payload:     payload,
@@ -116,10 +96,10 @@ func InsertJob(t *testing.T, db *DB, opts InsertOpts) repository.Job {
 	return job
 }
 
-func GetJob(t *testing.T, db *DB, id uuid.UUID) repository.Job {
+func GetJob(t *testing.T, db *DB, id uuid.UUID) store.Job {
 	t.Helper()
 
-	var job repository.Job
+	var job store.Job
 	err := db.Pool.QueryRow(context.Background(), `
 SELECT id, slug, payload, priority, max_attempts, status, attempts, logs, errors, created_at, started_at, ended_at
 FROM jobs WHERE id = $1`, id).Scan(

@@ -9,9 +9,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/thalestmm/gowork/internal/store"
 	"github.com/thalestmm/gowork/internal/testutil"
-	"github.com/thalestmm/gowork/jobs"
-	"github.com/thalestmm/gowork/repository"
 )
 
 func TestReapStaleJobs_resetsToPending(t *testing.T) {
@@ -20,14 +19,14 @@ func TestReapStaleJobs_resetsToPending(t *testing.T) {
 	testutil.TruncateJobs(t, db)
 
 	job := testutil.InsertJob(t, db, testutil.InsertOpts{Slug: testutil.SlugSuccess})
-	claimed, err := db.Queries.ClaimNextPendingJob(context.Background())
+	claimed, err := db.Store.ClaimNextPendingJob(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, jobs.StatusRunning, claimed.Status)
+	require.Equal(t, "running", claimed.Status)
 
 	testutil.SetJobStartedAt(t, db, job.ID, time.Now().Add(-time.Hour))
 
 	cutoff := time.Now().Add(-30 * time.Minute)
-	n, err := db.Queries.ReapStaleJobs(context.Background(), repository.ReapStaleJobsParams{
+	n, err := db.Store.ReapStaleJobs(context.Background(), store.ReapStaleJobsParams{
 		ErrorMessage: "stale test",
 		Cutoff:       &cutoff,
 	})
@@ -35,7 +34,7 @@ func TestReapStaleJobs_resetsToPending(t *testing.T) {
 	require.Equal(t, int64(1), n)
 
 	got := testutil.GetJob(t, db, job.ID)
-	require.Equal(t, jobs.StatusPending, got.Status)
+	require.Equal(t, "pending", got.Status)
 	require.Nil(t, got.StartedAt)
 	require.Contains(t, got.Errors[0], "stale test")
 }
@@ -51,21 +50,21 @@ func TestReapStaleJobs_failsWhenMaxAttempts(t *testing.T) {
 		MaxAttempts: &maxAttempts,
 	})
 
-	claimed, err := db.Queries.ClaimNextPendingJob(context.Background())
+	claimed, err := db.Store.ClaimNextPendingJob(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, int32(1), claimed.Attempts)
 
 	testutil.SetJobStartedAt(t, db, job.ID, time.Now().Add(-time.Hour))
 
 	cutoff := time.Now().Add(-30 * time.Minute)
-	_, err = db.Queries.ReapStaleJobs(context.Background(), repository.ReapStaleJobsParams{
+	_, err = db.Store.ReapStaleJobs(context.Background(), store.ReapStaleJobsParams{
 		ErrorMessage: "stale test",
 		Cutoff:       &cutoff,
 	})
 	require.NoError(t, err)
 
 	got := testutil.GetJob(t, db, job.ID)
-	require.Equal(t, jobs.StatusFailed, got.Status)
+	require.Equal(t, "failed", got.Status)
 	require.NotNil(t, got.EndedAt)
 }
 
@@ -75,11 +74,11 @@ func TestReapStaleJobs_ignoresFreshRunning(t *testing.T) {
 	testutil.TruncateJobs(t, db)
 
 	job := testutil.InsertJob(t, db, testutil.InsertOpts{Slug: testutil.SlugSuccess})
-	_, err := db.Queries.ClaimNextPendingJob(context.Background())
+	_, err := db.Store.ClaimNextPendingJob(context.Background())
 	require.NoError(t, err)
 
 	cutoff := time.Now().Add(-30 * time.Minute)
-	n, err := db.Queries.ReapStaleJobs(context.Background(), repository.ReapStaleJobsParams{
+	n, err := db.Store.ReapStaleJobs(context.Background(), store.ReapStaleJobsParams{
 		ErrorMessage: "stale test",
 		Cutoff:       &cutoff,
 	})
@@ -87,7 +86,7 @@ func TestReapStaleJobs_ignoresFreshRunning(t *testing.T) {
 	require.Equal(t, int64(0), n)
 
 	got := testutil.GetJob(t, db, job.ID)
-	require.Equal(t, jobs.StatusRunning, got.Status)
+	require.Equal(t, "running", got.Status)
 }
 
 func TestReapStaleJobs_ignoresPendingAndCompleted(t *testing.T) {
@@ -97,19 +96,19 @@ func TestReapStaleJobs_ignoresPendingAndCompleted(t *testing.T) {
 
 	pending := testutil.InsertJob(t, db, testutil.InsertOpts{Slug: testutil.SlugSuccess})
 	completed := testutil.InsertJob(t, db, testutil.InsertOpts{Slug: testutil.SlugSuccess})
-	err := db.Queries.CompleteJob(context.Background(), completed.ID)
+	err := db.Store.CompleteJob(context.Background(), completed.ID)
 	require.NoError(t, err)
 
 	cutoff := time.Now().Add(-30 * time.Minute)
-	n, err := db.Queries.ReapStaleJobs(context.Background(), repository.ReapStaleJobsParams{
+	n, err := db.Store.ReapStaleJobs(context.Background(), store.ReapStaleJobsParams{
 		ErrorMessage: "stale test",
 		Cutoff:       &cutoff,
 	})
 	require.NoError(t, err)
 	require.Equal(t, int64(0), n)
 
-	require.Equal(t, jobs.StatusPending, testutil.GetJob(t, db, pending.ID).Status)
-	require.Equal(t, jobs.StatusCompleted, testutil.GetJob(t, db, completed.ID).Status)
+	require.Equal(t, "pending", testutil.GetJob(t, db, pending.ID).Status)
+	require.Equal(t, "completed", testutil.GetJob(t, db, completed.ID).Status)
 }
 
 func TestRunStaleJobReaper_loop(t *testing.T) {
@@ -118,7 +117,7 @@ func TestRunStaleJobReaper_loop(t *testing.T) {
 	testutil.TruncateJobs(t, db)
 
 	job := testutil.InsertJob(t, db, testutil.InsertOpts{Slug: testutil.SlugSuccess})
-	_, err := db.Queries.ClaimNextPendingJob(context.Background())
+	_, err := db.Store.ClaimNextPendingJob(context.Background())
 	require.NoError(t, err)
 	testutil.SetJobStartedAt(t, db, job.ID, time.Now().Add(-time.Hour))
 
@@ -126,12 +125,12 @@ func TestRunStaleJobReaper_loop(t *testing.T) {
 	defer cancel()
 
 	go func() {
-		_ = RunStaleJobReaper(ctx, db.Queries, 50*time.Millisecond, 30*time.Minute)
+		_ = RunStaleJobReaper(ctx, db.Store, 50*time.Millisecond, 30*time.Minute)
 	}()
 
 	require.Eventually(t, func() bool {
 		got := testutil.GetJob(t, db, job.ID)
-		return got.Status == jobs.StatusPending && len(got.Errors) > 0
+		return got.Status == "pending" && len(got.Errors) > 0
 	}, 3*time.Second, 50*time.Millisecond)
 
 	got := testutil.GetJob(t, db, job.ID)

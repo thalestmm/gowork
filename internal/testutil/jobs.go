@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thalestmm/gowork/jobs"
+	"github.com/thalestmm/gowork/internal/registry"
 )
 
 const (
@@ -18,15 +18,15 @@ const (
 
 func RegisterTestJobs(t *testing.T) {
 	t.Helper()
-	jobs.ResetRegistry()
+	registry.ResetRegistry()
 	RegisterTestJobsWithoutCleanup()
-	t.Cleanup(jobs.ResetRegistry)
+	t.Cleanup(registry.ResetRegistry)
 }
 
 func RegisterTestJobsWithoutCleanup() {
-	jobs.Register(SlugSuccess, func() jobs.Job { return &SuccessJob{} })
-	jobs.Register(SlugFail, func() jobs.Job { return &FailJob{Err: errors.New("test failure")} })
-	jobs.Register(SlugSlow, func() jobs.Job { return &SlowJob{Delay: 10 * time.Second} })
+	registry.Register(SlugSuccess, func() registry.Job { return &SuccessJob{} })
+	registry.Register(SlugFail, func() registry.Job { return &FailJob{Err: errors.New("test failure")} })
+	registry.Register(SlugSlow, func() registry.Job { return &SlowJob{Delay: 10 * time.Second} })
 }
 
 type SuccessJob struct{}
