@@ -42,7 +42,7 @@ gowork.RunConcurrent(ctx, 4, worker)
 
 Consumers must have a `public.jobs` table that matches gowork's expected schema exactly. Two options:
 
-1. **Use `gowork.Migrate`** — creates the table and tracks versions in `gowork.schema_migrations` (isolated from goose, golang-migrate, etc.).
+1. **Use `gowork.Migrate`** — creates the table when missing, validates an existing table against the expected schema (returns `*SchemaError` on mismatch), and tracks versions in `gowork.schema_migrations` (isolated from goose, golang-migrate, etc.).
 2. **Apply your own migrations** — copy the DDL from [`internal/store/migrations/001_jobs.sql`](internal/store/migrations/001_jobs.sql) into your migration tool.
 
 `gowork.Open` validates the schema and returns a `*SchemaError` on mismatch (missing/extra columns or wrong types). It never migrates. For tests only, `gowork.WithSkipSchemaCheck()` disables validation.

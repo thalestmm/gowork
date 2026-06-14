@@ -66,6 +66,19 @@ type actualColumn struct {
 	Nullable bool
 }
 
+func jobsTableExists(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
+	var exists bool
+	err := pool.QueryRow(ctx, `
+SELECT EXISTS (
+  SELECT 1 FROM information_schema.tables
+  WHERE table_schema = 'public' AND table_name = $1
+)`, jobsTable).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check jobs table: %w", err)
+	}
+	return exists, nil
+}
+
 // ValidateSchema checks that public.jobs exists and matches the expected schema exactly.
 func ValidateSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	rows, err := pool.Query(ctx, `
