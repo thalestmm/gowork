@@ -19,3 +19,19 @@ alias g := generate
 
 generate:
   @sqlc generate
+
+alias r := run
+
+run:
+  @go run ./cmd/worker
+
+alias b := build
+
+build:
+  @go build -o bin/worker ./cmd/worker
+
+test:
+  @go test ./...
+
+test-integration:
+  @go test -tags=integration ./...
