@@ -266,6 +266,8 @@ All settings are read from environment variables by the example worker binary:
 | `JOB_TIMEOUT` | `5m` | Max execution time per job |
 | `STALE_JOB_TIMEOUT` | `10m` | Reclaim jobs stuck in `running` |
 | `REAPER_INTERVAL` | `1m` | Stale-job reaper tick interval |
+| `LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, `error` |
+| `LOG_FORMAT` | `text` | Log output format: `text` or `json` |
 
 Duration values use Go's duration format (`30s`, `5m`, `1h`).
 

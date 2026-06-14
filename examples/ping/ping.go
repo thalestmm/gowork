@@ -3,7 +3,7 @@ package ping
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 
 	"github.com/thalestmm/gowork"
 )
@@ -30,7 +30,7 @@ func (j *Job) Execute(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	log.Printf("ping job: %s", j.Message)
+	slog.Info("ping job executed", "message", j.Message)
 	return nil
 }
 
