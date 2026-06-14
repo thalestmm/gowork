@@ -1,13 +1,58 @@
 # gowork
 
-A simple Postgres-backed job queue in Go. Jobs are stored as rows in a `jobs` table, claimed atomically by workers using `FOR UPDATE SKIP LOCKED`, and executed by Go structs registered at startup via a slug-based registry.
+A Postgres-backed job queue library for Go. Jobs are stored as rows in a `jobs` table, claimed atomically by workers using `FOR UPDATE SKIP LOCKED`, and executed by Go structs registered at startup via a slug-based registry.
+
+## Getting started
+
+```go
+import (
+    "context"
+    "encoding/json"
+
+    "github.com/jackc/pgx/v5/pgxpool"
+    gowork "github.com/thalestmm/gowork"
+    _ "your/module/jobs" // blank-import packages that register handlers
+)
+
+pool, _ := pgxpool.New(ctx, dbURL)
+
+// Migrate is a separate setup step — Open never runs migrations.
+if err := gowork.Migrate(ctx, pool); err != nil {
+    log.Fatal(err)
+}
+
+client, err := gowork.Open(ctx, pool)
+if err != nil {
+    // *gowork.SchemaError when public.jobs doesn't match the expected schema
+    log.Fatal(err)
+}
+
+payload, _ := json.Marshal(map[string]string{"message": "hello"})
+id, err := client.Enqueue(ctx, gowork.EnqueueOpts{
+    Slug:    "ping",
+    Payload: payload,
+})
+
+worker := client.NewSimpleWorker(gowork.WorkerConfig{})
+go client.RunStaleJobReaper(ctx, gowork.DefaultReaperInterval, gowork.DefaultStaleJobAfter)
+gowork.RunConcurrent(ctx, 4, worker)
+```
+
+### Schema requirements
+
+Consumers must have a `public.jobs` table that matches gowork's expected schema exactly. Two options:
+
+1. **Use `gowork.Migrate`** — creates the table and tracks versions in `gowork.schema_migrations` (isolated from goose, golang-migrate, etc.).
+2. **Apply your own migrations** — copy the DDL from [`internal/store/migrations/001_jobs.sql`](internal/store/migrations/001_jobs.sql) into your migration tool.
+
+`gowork.Open` validates the schema and returns a `*SchemaError` on mismatch (missing/extra columns or wrong types). It never migrates. For tests only, `gowork.WithSkipSchemaCheck()` disables validation.
 
 ## How it works
 
 ### Overview
 
 ```
-Enqueue (InsertJob)          Worker claim loop
+Enqueue (client.Enqueue)     Worker claim loop
        │                            │
        ▼                            ▼
   ┌─────────┐    FOR UPDATE    ┌──────────┐
@@ -20,14 +65,7 @@ Enqueue (InsertJob)          Worker claim loop
        └──── CompleteJob / FailJob ◄┘
 ```
 
-There are two distinct `Job` types in the codebase:
-
-| Type | Package | Role |
-|------|---------|------|
-| `repository.Job` | `repository` | sqlc-generated struct mirroring a DB row |
-| `jobs.Job` (interface) | `jobs` | Runtime handler with `Execute(ctx)` logic |
-
-Workers bridge the two: they claim a `repository.Job` row, look up a Go handler by `slug`, parse the JSON payload, and call `Execute`.
+Workers claim a DB row, look up a Go handler by `slug`, parse the JSON payload, and call `Execute`. The public `gowork.Job` interface is the handler contract; the DB row type stays internal.
 
 ### Job lifecycle
 
@@ -61,13 +99,13 @@ Jobs are ordered by **priority descending**, then **created_at ascending** (high
 
 Three worker implementations share the same claim → execute → complete/fail loop but differ in which jobs they pick up:
 
-| Worker | Picks up |
-|--------|----------|
-| `SimpleWorker` | Next pending job (any slug) |
-| `PriorityWorker` | Next pending job where `min < priority < max` (exclusive bounds; nil max = no upper bound) |
-| `SpecificTaskWorker` | Next pending job matching a single slug |
+| Worker | Constructor | Picks up |
+|--------|-------------|----------|
+| Simple | `client.NewSimpleWorker(cfg)` | Next pending job (any slug) |
+| Priority | `client.NewPriorityWorker(cfg, min, max)` | Next pending job where `min < priority < max` (exclusive bounds; nil max = no upper bound) |
+| Specific task | `client.NewSpecificTaskWorker(cfg, slug)` | Next pending job matching a single slug |
 
-The worker binary owns orchestration: it configures concurrency, starts goroutines via `worker.RunConcurrent`, and runs the stale-job reaper in the background. Each worker's `Run(ctx)` is a blocking loop, which keeps the logic easy to test.
+The worker binary owns orchestration: it configures concurrency, starts goroutines via `gowork.RunConcurrent`, and runs the stale-job reaper in the background. Each worker's `Run(ctx)` is a blocking loop, which keeps the logic easy to test.
 
 ### Timeouts
 
@@ -85,47 +123,38 @@ Execution timeout works by wrapping each job in `context.WithTimeout`. Jobs shou
 
 ## Package layout
 
-Job handlers live in the `jobs/` package. Each job type gets its own file; registration happens in `init()` so handlers are available as soon as the package is imported.
-
 ```
-jobs/
-├── job.go          # Job interface, slug registry, NewQueuedJob
-├── ping.go         # Example: PingJob
-└── send_email.go   # Your new job (one file per slug)
+gowork/
+├── client.go, job.go, worker.go   # Public API
+├── migrate.go, schema.go          # Setup and validation
+├── cmd/worker/main.go             # Example worker binary
+├── examples/ping/ping.go          # Example job handler
+└── internal/
+    ├── store/                     # sqlc-generated Postgres access
+    ├── registry/                  # Slug → handler registry
+    └── worker/                    # Claim loop, pool, reaper
 ```
 
-| File | Responsibility |
-|------|----------------|
-| `jobs/job.go` | Shared types — `Job` interface, `Register`, `NewJob`, `QueuedJob` |
-| `jobs/<name>.go` | One concrete job type + `init()` registration |
+| Package | Role |
+|---------|------|
+| `gowork` (root) | Public API — `Migrate`, `Open`, `Register`, `Enqueue`, worker constructors |
+| `internal/store` | Postgres queries (sqlc-generated, not exported) |
+| `internal/registry` | Handler registry used by workers |
+| `internal/worker` | Worker implementation |
+| `examples/ping` | Sample job handler |
+| `cmd/worker` | Runnable worker binary |
 
-The worker binary imports the package to trigger registration:
+Job handlers live in **your application**, not in this library. Each handler is a struct that implements `gowork.Job` and registers itself in `init()`. The worker binary blank-imports handler packages to trigger registration:
 
 ```go
-import _ "github.com/thalestmm/gowork/jobs"
+import _ "github.com/thalestmm/gowork/examples/ping"
 ```
-
-If you split jobs across multiple packages later (e.g. `jobs/email/`, `jobs/billing/`), each subpackage registers its handlers the same way and the worker imports them all.
-
-Worker infrastructure lives in `internal/worker/`:
-
-```
-internal/worker/
-├── config.go       # Config, timeout defaults
-├── worker.go       # SimpleWorker, PriorityWorker, SpecificTaskWorker
-├── pool.go         # RunConcurrent — spawns goroutine pools
-└── reaper.go       # RunStaleJobReaper — recovers stuck jobs
-```
-
-`cmd/worker/main.go` is the only binary for now. It wires env config, the DB pool, the reaper, and `worker.RunConcurrent`. A future `cmd/api/main.go` would enqueue jobs via `repository.InsertJob` without importing `internal/worker`.
 
 ## Implementing a new job
 
-Every job is a struct in the `jobs` package that implements the `Job` interface and registers itself in `init()`.
+Every job is a struct in your app that implements the `gowork.Job` interface and registers itself in `init()`.
 
 ### 1. Create a new file
-
-Add `jobs/send_email.go`:
 
 ```go
 package jobs
@@ -133,6 +162,8 @@ package jobs
 import (
     "context"
     "encoding/json"
+
+    gowork "github.com/thalestmm/gowork"
 )
 
 type SendEmailJob struct {
@@ -159,7 +190,6 @@ func (j *SendEmailJob) ParseParams(raw json.RawMessage) error {
 }
 
 func (j *SendEmailJob) Execute(ctx context.Context) error {
-    // Always respect ctx — pass it to HTTP, DB, and other blocking calls.
     return sendEmail(ctx, j.To, j.Subject, j.Body)
 }
 ```
@@ -168,13 +198,13 @@ func (j *SendEmailJob) Execute(ctx context.Context) error {
 
 ```go
 func init() {
-    Register("send_email", func() Job { return &SendEmailJob{} })
+    gowork.Register("send_email", func() gowork.Job { return &SendEmailJob{} })
 }
 ```
 
-The `slug` string must match the `slug` column when enqueueing. If a worker claims a row whose slug has no registered handler, the job is immediately failed.
+The `slug` string must match the `slug` field when enqueueing. If a worker claims a row whose slug has no registered handler, the job is immediately failed.
 
-See [`jobs/ping.go`](jobs/ping.go) for a working example.
+See [`examples/ping/ping.go`](examples/ping/ping.go) for a working example.
 
 ### Guidelines
 
@@ -186,15 +216,9 @@ See [`jobs/ping.go`](jobs/ping.go) for a working example.
 
 ## Enqueueing jobs
 
-Use the generated `InsertJob` query from the `repository` package:
+Use `client.Enqueue`:
 
 ```go
-import (
-    "encoding/json"
-    "github.com/google/uuid"
-    "github.com/thalestmm/gowork/repository"
-)
-
 payload, _ := json.Marshal(map[string]string{
     "to":      "user@example.com",
     "subject": "Hello",
@@ -202,10 +226,9 @@ payload, _ := json.Marshal(map[string]string{
 })
 
 maxAttempts := int32(3)
-job, err := queries.InsertJob(ctx, repository.InsertJobParams{
-    ID:          uuid.New(),
+id, err := client.Enqueue(ctx, gowork.EnqueueOpts{
     Slug:        "send_email",
-    Payload:     (*json.RawMessage)(&payload),
+    Payload:     payload,
     Priority:    0,
     MaxAttempts: &maxAttempts, // nil = unlimited retries
 })
@@ -215,7 +238,7 @@ job, err := queries.InsertJob(ctx, repository.InsertJobParams{
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `id` | UUID | Primary key (generate client-side) |
+| `id` | UUID | Primary key (auto-generated if omitted) |
 | `slug` | text | Maps to a registered handler |
 | `payload` | JSONB | Arguments for the handler |
 | `priority` | int | Higher values are picked first |
@@ -230,7 +253,7 @@ job, err := queries.InsertJob(ctx, repository.InsertJobParams{
 
 ## Configuration
 
-All settings are read from environment variables:
+All settings are read from environment variables by the example worker binary:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -245,54 +268,21 @@ Duration values use Go's duration format (`30s`, `5m`, `1h`).
 
 ## Running multiple worker types
 
-`worker.RunConcurrent` accepts multiple workers and spawns `concurrency` goroutines for each:
+`gowork.RunConcurrent` accepts multiple workers and spawns `concurrency` goroutines for each:
 
 ```go
-import "github.com/thalestmm/gowork/internal/worker"
+cfg := gowork.WorkerConfig{
+    Poll:       gowork.DefaultPollInterval,
+    JobTimeout: gowork.DefaultJobTimeout,
+}
 
-cfg := worker.Config{Poll: time.Second, JobTimeout: 5 * time.Minute}
-
-worker.RunConcurrent(ctx, 4,
-    worker.NewSimple(queries, cfg),
-    worker.NewSpecificTask(queries, cfg, "send_email"),
+gowork.RunConcurrent(ctx, 4,
+    client.NewSimpleWorker(cfg),
+    client.NewSpecificTaskWorker(cfg, "send_email"),
 )
 ```
 
 Each goroutine runs an independent claim loop. Because claiming uses `SKIP LOCKED`, they will not interfere with each other.
-
-## Project structure
-
-```
-gowork/
-├── cmd/
-│   └── worker/
-│       └── main.go                  # Worker binary entrypoint
-├── internal/
-│   └── worker/
-│       ├── config.go                # Worker config and defaults
-│       ├── worker.go                # Worker types and claim loop
-│       ├── pool.go                  # RunConcurrent
-│       └── reaper.go                # Stale-job reaper
-├── jobs/
-│   ├── job.go                       # Job interface, registry, QueuedJob
-│   └── ping.go                      # Example job handler
-├── repository/
-│   ├── migrations/                  # Goose SQL migrations
-│   │   └── 001_initial_schema.sql
-│   ├── queries/                     # sqlc query definitions
-│   │   └── jobs.sql
-│   ├── models.go                    # Generated row types
-│   └── jobs.sql.go                  # Generated query methods
-├── sqlc.yaml                        # sqlc config (stdlib Go types)
-└── justfile                         # Task runner (sqlc generate, etc.)
-```
-
-| Package | Role |
-|---------|------|
-| `cmd/worker` | Binary — env config, DB pool, start workers |
-| `internal/worker` | Claim loop, concurrency pool, stale-job reaper |
-| `jobs` | Job handlers registered by slug |
-| `repository` | Postgres access (sqlc-generated) |
 
 ## Testing
 
@@ -303,12 +293,12 @@ Tests are split into two layers:
 | Unit | `just test` or `go test ./...` | No |
 | Integration | `just test-integration` or `go test -tags=integration ./...` | Yes |
 
-Integration tests use [testcontainers](https://golang.testcontainers.org/) to spin up Postgres 16 and exercise real SQL (`SKIP LOCKED`, claim ordering, fail/retry, stale reaper, worker lifecycle).
+Integration tests use [testcontainers](https://golang.testcontainers.org/) to spin up Postgres 16 and exercise real SQL (`SKIP LOCKED`, claim ordering, fail/retry, stale reaper, worker lifecycle, schema validation).
 
 ### What's covered
 
-- **Unit** — job registry/parsing, config defaults, `RunConcurrent`, execution timeouts via `runJob`
-- **Integration** — complete/fail/retry flows, max attempts, unknown slug, job timeout, claim ordering, priority/specific workers, concurrent claims, stale-job reaper
+- **Unit** — job registry/parsing, config defaults, `RunConcurrent`, execution timeouts, `SchemaError` formatting
+- **Integration** — complete/fail/retry flows, max attempts, unknown slug, job timeout, claim ordering, priority/specific workers, concurrent claims, stale-job reaper, schema mismatch detection
 
 Test helpers live in [`internal/testutil/`](internal/testutil/) (`StartPostgres`, `InsertJob`, test job handlers). Integration test files use the `//go:build integration` tag.
 
@@ -317,30 +307,26 @@ Test helpers live in [`internal/testutil/`](internal/testutil/) (`StartPostgres`
 ### Prerequisites
 
 - Go 1.26+
-- Postgres
+- Postgres (or Docker for integration tests)
 - [sqlc](https://sqlc.dev/) for code generation
-- [goose](https://github.com/pressly/goose) for migrations (optional)
 
 ### Setup
 
 ```bash
-# Run migrations against your database
-goose -dir repository/migrations postgres "$DATABASE_URL" up
-
-# Regenerate repository code after changing SQL
+# Regenerate store code after changing SQL
 just generate
 
 # Build and run the worker
-go build -o bin/worker ./cmd/worker
+just build
 ./bin/worker
 
 # Or run directly
-go run ./cmd/worker
+just run
 ```
 
 ### Changing SQL queries
 
-1. Edit files in `repository/queries/`.
+1. Edit files in `internal/store/queries/`.
 2. Run `just generate` (or `sqlc generate`).
 3. Update Go code if query signatures changed.
 
