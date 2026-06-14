@@ -7,7 +7,183 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
+	"time"
+
+	"github.com/google/uuid"
 )
+
+const appendJobLog = `-- name: AppendJobLog :exec
+UPDATE jobs
+SET logs = array_append(logs, $1::text)
+WHERE id = $2
+`
+
+type AppendJobLogParams struct {
+	LogMessage string    `json:"log_message"`
+	ID         uuid.UUID `json:"id"`
+}
+
+func (q *Queries) AppendJobLog(ctx context.Context, arg AppendJobLogParams) error {
+	_, err := q.db.Exec(ctx, appendJobLog, arg.LogMessage, arg.ID)
+	return err
+}
+
+const claimNextPendingJob = `-- name: ClaimNextPendingJob :one
+UPDATE jobs
+SET
+    status = 'running',
+    attempts = attempts + 1,
+    started_at = NOW()
+WHERE id = (
+    SELECT j.id FROM jobs j
+    WHERE j.status = 'pending'
+    ORDER BY j.priority DESC, j.created_at ASC
+    FOR UPDATE SKIP LOCKED
+    LIMIT 1
+)
+RETURNING id, slug, payload, priority, max_attempts, status, attempts, logs, errors, created_at, started_at, ended_at
+`
+
+func (q *Queries) ClaimNextPendingJob(ctx context.Context) (Job, error) {
+	row := q.db.QueryRow(ctx, claimNextPendingJob)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Slug,
+		&i.Payload,
+		&i.Priority,
+		&i.MaxAttempts,
+		&i.Status,
+		&i.Attempts,
+		&i.Logs,
+		&i.Errors,
+		&i.CreatedAt,
+		&i.StartedAt,
+		&i.EndedAt,
+	)
+	return i, err
+}
+
+const claimNextPendingJobByPriority = `-- name: ClaimNextPendingJobByPriority :one
+UPDATE jobs
+SET
+    status = 'running',
+    attempts = attempts + 1,
+    started_at = NOW()
+WHERE id = (
+    SELECT j.id FROM jobs j
+    WHERE j.status = 'pending'
+      AND j.priority > $1
+      AND ($2::int IS NULL OR j.priority < $2)
+    ORDER BY j.priority DESC, j.created_at ASC
+    FOR UPDATE SKIP LOCKED
+    LIMIT 1
+)
+RETURNING id, slug, payload, priority, max_attempts, status, attempts, logs, errors, created_at, started_at, ended_at
+`
+
+type ClaimNextPendingJobByPriorityParams struct {
+	MinPriority int32  `json:"min_priority"`
+	MaxPriority *int32 `json:"max_priority"`
+}
+
+func (q *Queries) ClaimNextPendingJobByPriority(ctx context.Context, arg ClaimNextPendingJobByPriorityParams) (Job, error) {
+	row := q.db.QueryRow(ctx, claimNextPendingJobByPriority, arg.MinPriority, arg.MaxPriority)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Slug,
+		&i.Payload,
+		&i.Priority,
+		&i.MaxAttempts,
+		&i.Status,
+		&i.Attempts,
+		&i.Logs,
+		&i.Errors,
+		&i.CreatedAt,
+		&i.StartedAt,
+		&i.EndedAt,
+	)
+	return i, err
+}
+
+const claimNextPendingJobBySlug = `-- name: ClaimNextPendingJobBySlug :one
+UPDATE jobs
+SET
+    status = 'running',
+    attempts = attempts + 1,
+    started_at = NOW()
+WHERE id = (
+    SELECT j.id FROM jobs j
+    WHERE j.status = 'pending'
+      AND j.slug = $1
+    ORDER BY j.priority DESC, j.created_at ASC
+    FOR UPDATE SKIP LOCKED
+    LIMIT 1
+)
+RETURNING id, slug, payload, priority, max_attempts, status, attempts, logs, errors, created_at, started_at, ended_at
+`
+
+func (q *Queries) ClaimNextPendingJobBySlug(ctx context.Context, slug string) (Job, error) {
+	row := q.db.QueryRow(ctx, claimNextPendingJobBySlug, slug)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Slug,
+		&i.Payload,
+		&i.Priority,
+		&i.MaxAttempts,
+		&i.Status,
+		&i.Attempts,
+		&i.Logs,
+		&i.Errors,
+		&i.CreatedAt,
+		&i.StartedAt,
+		&i.EndedAt,
+	)
+	return i, err
+}
+
+const completeJob = `-- name: CompleteJob :exec
+UPDATE jobs
+SET status = 'completed', ended_at = NOW()
+WHERE id = $1
+`
+
+func (q *Queries) CompleteJob(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, completeJob, id)
+	return err
+}
+
+const failJob = `-- name: FailJob :exec
+UPDATE jobs
+SET
+    status = CASE
+        WHEN max_attempts IS NOT NULL AND attempts >= max_attempts THEN 'failed'
+        ELSE 'pending'
+    END,
+    errors = array_append(errors, $1::text),
+    ended_at = CASE
+        WHEN max_attempts IS NOT NULL AND attempts >= max_attempts THEN NOW()
+        ELSE NULL
+    END,
+    started_at = CASE
+        WHEN max_attempts IS NOT NULL AND attempts >= max_attempts THEN started_at
+        ELSE NULL
+    END
+WHERE id = $2
+`
+
+type FailJobParams struct {
+	ErrorMessage string    `json:"error_message"`
+	ID           uuid.UUID `json:"id"`
+}
+
+func (q *Queries) FailJob(ctx context.Context, arg FailJobParams) error {
+	_, err := q.db.Exec(ctx, failJob, arg.ErrorMessage, arg.ID)
+	return err
+}
 
 const getAllJobs = `-- name: GetAllJobs :many
 SELECT id, slug, payload, priority, max_attempts, status, attempts, logs, errors, created_at, started_at, ended_at FROM jobs
@@ -44,4 +220,75 @@ func (q *Queries) GetAllJobs(ctx context.Context) ([]Job, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const insertJob = `-- name: InsertJob :one
+INSERT INTO jobs (id, slug, payload, priority, max_attempts)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, slug, payload, priority, max_attempts, status, attempts, logs, errors, created_at, started_at, ended_at
+`
+
+type InsertJobParams struct {
+	ID          uuid.UUID        `json:"id"`
+	Slug        string           `json:"slug"`
+	Payload     *json.RawMessage `json:"payload"`
+	Priority    int32            `json:"priority"`
+	MaxAttempts *int32           `json:"max_attempts"`
+}
+
+func (q *Queries) InsertJob(ctx context.Context, arg InsertJobParams) (Job, error) {
+	row := q.db.QueryRow(ctx, insertJob,
+		arg.ID,
+		arg.Slug,
+		arg.Payload,
+		arg.Priority,
+		arg.MaxAttempts,
+	)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Slug,
+		&i.Payload,
+		&i.Priority,
+		&i.MaxAttempts,
+		&i.Status,
+		&i.Attempts,
+		&i.Logs,
+		&i.Errors,
+		&i.CreatedAt,
+		&i.StartedAt,
+		&i.EndedAt,
+	)
+	return i, err
+}
+
+const reapStaleJobs = `-- name: ReapStaleJobs :execrows
+UPDATE jobs
+SET
+    status = CASE
+        WHEN max_attempts IS NOT NULL AND attempts >= max_attempts THEN 'failed'
+        ELSE 'pending'
+    END,
+    errors = array_append(errors, $1::text),
+    ended_at = CASE
+        WHEN max_attempts IS NOT NULL AND attempts >= max_attempts THEN NOW()
+        ELSE NULL
+    END,
+    started_at = NULL
+WHERE status = 'running'
+  AND started_at IS NOT NULL
+  AND started_at < $2
+`
+
+type ReapStaleJobsParams struct {
+	ErrorMessage string     `json:"error_message"`
+	Cutoff       *time.Time `json:"cutoff"`
+}
+
+func (q *Queries) ReapStaleJobs(ctx context.Context, arg ReapStaleJobsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, reapStaleJobs, arg.ErrorMessage, arg.Cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

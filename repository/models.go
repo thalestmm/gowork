@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type Job struct {
@@ -17,7 +16,7 @@ type Job struct {
 	Slug        string           `json:"slug"`
 	Payload     *json.RawMessage `json:"payload"`
 	Priority    int32            `json:"priority"`
-	MaxAttempts pgtype.Int4      `json:"max_attempts"`
+	MaxAttempts *int32           `json:"max_attempts"`
 	Status      string           `json:"status"`
 	Attempts    int32            `json:"attempts"`
 	Logs        []string         `json:"logs"`
