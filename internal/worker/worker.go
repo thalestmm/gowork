@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -15,6 +16,7 @@ type workerDeps struct {
 	db         *store.Queries
 	poll       time.Duration
 	jobTimeout time.Duration
+	logger     *slog.Logger
 }
 
 type claimFunc func(ctx context.Context, q *store.Queries) (store.Job, error)
@@ -25,6 +27,7 @@ func newWorkerDeps(db *store.Queries, cfg Config) workerDeps {
 		db:         db,
 		poll:       cfg.Poll,
 		jobTimeout: cfg.JobTimeout,
+		logger:     cfg.Logger,
 	}
 }
 
@@ -39,6 +42,11 @@ func (d workerDeps) claim(ctx context.Context, claim claimFunc) (*registry.Queue
 
 	queued, err := registry.NewQueuedJob(row)
 	if err != nil {
+		d.logger.Warn("job rejected",
+			"job_id", row.ID,
+			"slug", row.Slug,
+			"error", err,
+		)
 		failErr := d.db.FailJob(ctx, store.FailJobParams{
 			ErrorMessage: err.Error(),
 			ID:           row.ID,
@@ -52,6 +60,12 @@ func (d workerDeps) claim(ctx context.Context, claim claimFunc) (*registry.Queue
 }
 
 func (d workerDeps) process(ctx context.Context, queued *registry.QueuedJob) error {
+	d.logger.Info("job claimed",
+		"job_id", queued.ID,
+		"slug", queued.Slug,
+		"attempt", queued.Attempts,
+	)
+
 	_ = d.db.AppendJobLog(ctx, store.AppendJobLogParams{
 		LogMessage: fmt.Sprintf("started %q (attempt %d)", queued.Slug, queued.Attempts),
 		ID:         queued.ID,
@@ -67,6 +81,12 @@ func (d workerDeps) process(ctx context.Context, queued *registry.QueuedJob) err
 		}); failErr != nil {
 			return fmt.Errorf("execute job %s: %w (fail job: %v)", queued.ID, err, failErr)
 		}
+		d.logger.Warn("job failed",
+			"job_id", queued.ID,
+			"slug", queued.Slug,
+			"attempt", queued.Attempts,
+			"error", err,
+		)
 		_ = d.db.AppendJobLog(ctx, store.AppendJobLogParams{
 			LogMessage: fmt.Sprintf("failed: %s", err),
 			ID:         queued.ID,
@@ -77,6 +97,11 @@ func (d workerDeps) process(ctx context.Context, queued *registry.QueuedJob) err
 	if err := d.db.CompleteJob(ctx, queued.ID); err != nil {
 		return fmt.Errorf("complete job %s: %w", queued.ID, err)
 	}
+	d.logger.Info("job completed",
+		"job_id", queued.ID,
+		"slug", queued.Slug,
+		"attempt", queued.Attempts,
+	)
 	_ = d.db.AppendJobLog(ctx, store.AppendJobLogParams{
 		LogMessage: "completed",
 		ID:         queued.ID,
@@ -106,14 +131,23 @@ func (d workerDeps) runLoop(ctx context.Context, claim claimFunc) error {
 		default:
 			queued, found, err := d.claim(ctx, claim)
 			if err != nil {
+				d.logger.Error("claim failed", "error", err)
 				return err
 			}
 			if !found {
+				d.logger.Debug("no jobs available",
+					"poll_interval", d.poll,
+				)
 				time.Sleep(d.poll)
 				continue
 			}
 			if queued != nil {
 				if err := d.process(ctx, queued); err != nil {
+					d.logger.Error("process failed",
+						"job_id", queued.ID,
+						"slug", queued.Slug,
+						"error", err,
+					)
 					return err
 				}
 			}

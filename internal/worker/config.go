@@ -1,6 +1,9 @@
 package worker
 
-import "time"
+import (
+	"log/slog"
+	"time"
+)
 
 const (
 	DefaultPollInterval   = time.Second
@@ -12,6 +15,7 @@ const (
 type Config struct {
 	Poll       time.Duration
 	JobTimeout time.Duration
+	Logger     *slog.Logger
 }
 
 func (c Config) withDefaults() Config {
@@ -20,6 +24,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.JobTimeout <= 0 {
 		c.JobTimeout = DefaultJobTimeout
+	}
+	if c.Logger == nil {
+		c.Logger = slog.Default()
 	}
 	return c
 }

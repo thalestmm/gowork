@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 )
 
@@ -24,6 +25,8 @@ func RunConcurrent(ctx context.Context, concurrency int, workers ...Worker) erro
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	logger := slog.Default().With("subsystem", "pool")
+
 	var (
 		wg   sync.WaitGroup
 		mu   sync.Mutex
@@ -36,6 +39,7 @@ func RunConcurrent(ctx context.Context, concurrency int, workers ...Worker) erro
 			go func(w Worker) {
 				defer wg.Done()
 				if err := w.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+					logger.Error("worker stopped", "error", err)
 					mu.Lock()
 					errs = append(errs, err)
 					mu.Unlock()
