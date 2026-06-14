@@ -25,10 +25,21 @@ alias r := run
 run:
   @go run ./cmd/worker
 
+alias rc := run-client
+
+run-client:
+  @go run ./cmd/client
+
+alias se := start-environment
+
+start-environment:
+  @docker compose -f deployments/docker-compose.env.yml up -d
+
 alias b := build
 
 build:
   @go build -o bin/worker ./cmd/worker
+  @go build -o bin/client ./cmd/client
 
 alias t := test
 
