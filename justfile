@@ -88,5 +88,6 @@ tag version="patch":
   fi
 
   git tag -a "$new" -m "gowork $new"
+  git push origin "$new"
   echo "Created tag $new (from $last)"
 
